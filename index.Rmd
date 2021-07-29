@@ -1,0 +1,255 @@
+---
+title: "Proyecto-Orquídeas, Maikol F, Estefanía P y Nikole C."
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+---
+
+```{r carga-paquetes, message=FALSE, warning=FALSE}
+# carga de paquetes
+
+library(sf)
+library(raster)
+library(dplyr)
+library(spData)
+library(leaflet)
+library(plotly)
+library(DT)
+library(tidyr)
+library(flexdashboard)
+```
+
+```{r carga-datos}
+
+orqui <-
+  st_read(
+    "https://raw.githubusercontent.com/gf0604-procesamientodatosgeograficos/2021i-datos/main/gbif/orchidaceae-cr-registros.csv",
+    
+    options = c(
+      "X_POSSIBLE_NAMES=decimalLongitude",
+      "Y_POSSIBLE_NAMES=decimalLatitude"
+    ),
+    quiet = TRUE
+  )
+
+st_crs(orqui) = 4326
+
+cantones <-
+  st_read(
+    "https://raw.githubusercontent.com/gf0604-procesamientodatosgeograficos/2021i-datos/main/ign/delimitacion-territorial-administrativa/cr_cantones_simp_wgs84.geojson",
+    quiet = TRUE
+  )
+
+provincias <-
+  st_read(
+    "https://raw.githubusercontent.com/gf0604-procesamientodatosgeograficos/2021i-datos/main/ign/delimitacion-territorial-administrativa/cr_provincias_simp_wgs84.geojson",
+    quiet = TRUE
+  )
+```
+
+```{r cruce-cantones, message=FALSE}
+orqui <-
+  orqui %>%
+  st_join(cantones["canton"]) %>%
+  st_join(provincias["provincia"])
+```
+
+```{r message=FALSE, warning=FALSE}
+# Limpieza
+
+orqui <- orqui %>%
+  filter(!is.na(coordinateUncertaintyInMeters) & coordinateUncertaintyInMeters <= 1000)%>%
+  filter(species!="orquideas")
+```
+
+
+Column {data-width=650}
+-----------------------------------------------------------------------
+
+### Registros de presencia
+
+```{r tabla-registros, message=FALSE}
+orqui %>%
+  st_drop_geometry() %>%
+  dplyr::select(species, stateProvince, canton, eventDate) %>%
+  datatable(
+    colnames = c("Especies", "Provincia", "canton", "Fecha"),
+    options = list(
+      searchHighlight = TRUE,
+      language = list(url = '//cdn.datatables.net/plug-ins/1.10.11/i18n/Spanish.json')
+    )
+  )
+```
+
+### Especies
+
+```{r}
+inp1 <- orqui %>%
+  filter(!is.na(species) & species != "") %>%
+  group_by(species) %>% 
+  summarise(registros = n())
+valueBox(value = nrow(inp1), 
+         icon = "fas fa-feather", 
+         color = "#CD5C5C")
+```
+
+### Géneros
+
+```{r}
+inp2 <- orqui %>%
+  filter(!is.na(genus) & genus != "") %>%
+  group_by(genus) %>% 
+  summarise(registros = n())
+valueBox(value = nrow(inp2), 
+         icon = "fas fa-seedling", 
+         color = "#8FBC8F")
+```
+
+### Presencia
+
+```{r, tabla de registros}
+valueBox(value = nrow(orqui), 
+         caption = "Registros de presencia", 
+         icon = "far fa-flag",
+         color = "#FFDAB9"
+)
+```
+
+
+Column {data-width=350}
+-----------------------------------------------------------------------
+
+### Gráfico
+
+```{r grafico, message=FALSE, warning=FALSE}
+
+orqui_data_registros <-
+  orqui %>%
+  st_drop_geometry() %>%
+  filter(!is.na(species) & species != "") %>%
+  group_by(species) %>%
+  summarise(registros = n()) %>%
+  arrange(desc(registros)) %>%
+  slice(1:10) 
+
+otros_registros <-
+  orqui %>% 
+  st_drop_geometry() %>%
+  filter(!is.na(species) & species != "") %>%
+  group_by(species) %>% 
+  summarise(registros = n()) %>%
+  arrange(desc(registros)) %>%
+  slice(11:232) %>%
+  group_by(species = as.character("Otros")) %>%
+  summarise(registros = sum(registros))
+
+agrupación_orqui <-
+  merge(orqui_data_registros, otros_registros, all = TRUE) 
+
+pal_plotly <- c("#DA70D6", "#9966CC", "#800080", "#FFF0F5", "#7B68EE",
+                "#DDA0DD", "#FF69B4", "#DB7093", "#F08080", "#FFC0CB")
+
+# Grafico
+plot_ly(agrupación_orqui, labels =  ~species, values = ~registros, type = 'pie',
+        textposition = 'inside',
+        insidetextfont = list(color = '#FF7F50'),
+        hoverinfo = "label+value",
+        showlegend = TRUE,
+        marker = list (colors = pal_plotly),
+        marker = list(line = list(color = "#000", width = 2))
+) %>%
+  layout(title = 'Agrupación de orquideas en Costa Rica') %>%
+  config(locale = "es")
+
+```
+
+### Mapa orquideas
+
+```{r}
+# Capa raster
+# Capa de altitud
+altitud <-
+  raster::getData(
+    "worldclim",
+    var = "alt",
+    res = 0.5,
+    lon = -84,
+    lat = 10
+  )
+
+# Capa de altitud con el sistema de coordenadas
+altitud <-
+  altitud %>%
+  projectRaster(crs = 4326)
+
+# Recorte de la capa de altitud a las provincias de Costa Rica
+alti <-
+  altitud %>%
+  crop(provincias) %>%
+  mask(provincias)
+
+# Raster
+raster_plantilla <-
+  alti %>%
+  aggregate(fact = 11)
+
+# Rasterización
+orqui_raster_registros <-
+  rasterize(orqui,
+            raster_plantilla,
+            field = 1,
+            fun = "count")
+
+# Colores
+pale_raster <-
+  colorNumeric(
+    c("#9ACD32", "#B0C4DE", "#4169E1", "#DEB887", "#DAA520", "#CD5C5C"),
+    values(orqui_raster_registros), 
+    na.color = "transparent"
+  )
+
+# Mapa de registros de presencia
+leaflet() %>%
+  setView(lng = -84.0, lat = 10.0, zoom = 8) %>%
+  addProviderTiles(providers$OpenStreetMap.Mapnik, group = "OpenStreetMap") %>%
+  addProviderTiles(providers$Stamen.TonerLite, group = "Stamen Toner Lite") %>%
+  addPolygons(
+    data = provincias,
+    fillColor = FALSE,
+    fillOpacity = 0,
+    stroke = TRUE,
+    color = "#008B8B",
+    weight = 2,
+    group = "Ubicación por provincia" 
+  ) %>%
+  addRasterImage(
+    orqui_raster_registros,
+    colors = pale_raster,
+    opacity = 1,
+    group = "Datos de orquídeas"
+  ) %>%
+  addLayersControl(
+    baseGroups = c("Stamen Toner Lite", "OpenStreetMap"),
+    overlayGroups = c("Ubicación por provincia", "Datos de orquídeas")
+  ) %>%
+  addScaleBar(position = "bottomleft", options = scaleBarOptions(imperial = FALSE)) %>%
+  addMiniMap(
+    tiles =providers$OpenStreetMap.Mapnik ,
+    position = "bottomleft",
+    toggleDisplay = TRUE
+  ) %>% 
+  addLegend(
+    pal = pale_raster,
+    values = values(orqui_raster_registros),
+    position = "bottomright",
+    title = "Cantidad de <br>especies<br>por celda",
+    group = "Datos-Orquideas"
+  )
+```
+
+
+
+
+
+
